@@ -44,9 +44,11 @@
 extern char g_UseArgsName;
 extern char g_ArgsName[32];
 extern char g_KeepServerRunning;
+extern volatile LONG g_ActiveThreadCount;
 STRPTR g_DiscoveryMessagePortName __attribute__((aligned(4))) = DISCOVERY_MESSAGE_PORT_NAME;
 
 static void discoveryThread();
+static void discoveryThreadBody();
 
 static void ExecVersionToKickstartVersion( UBYTE execVersion, UBYTE *major, UBYTE *minor, UBYTE *rev )
 {
@@ -283,6 +285,8 @@ void startDiscoveryThread()
 
 			return;
 		}
+		//Count this live child so the master waits for it before unloading the seglist.
+		Forbid(); g_ActiveThreadCount++; Permit();
 		dbglog( "[startDiscoveryThread] Thread started.\n" );
 	}
 }
@@ -319,7 +323,16 @@ static void printInterfaceDebug()
 #endif
 
 #define ENABLE_DISCOVERY_REPLY 1
+//Entry point for the spawned discovery process.  Wraps the real body so the live
+//thread counter is always decremented exactly once, whatever exit path the body
+//takes, as our final act before returning into the system.
 static void discoveryThread()
+{
+	discoveryThreadBody();
+	Forbid(); g_ActiveThreadCount--; Permit();
+}
+
+static void discoveryThreadBody()
 {
 	dbglog( "[discoveryThread] Client thread started.\n" );
 
