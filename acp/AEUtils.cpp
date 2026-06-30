@@ -1,6 +1,6 @@
 #include "AEUtils.h"
 
-#include <QTextEncoder>
+#include <QStringConverter>
 #include <QDebug>
 
 QString prettyFileSize( quint64 size, bool withUnits )
@@ -61,7 +61,7 @@ QString convertFromAmigaTextEncoding( char *text )
 
 void convertFromUTF8ToAmigaTextEncoding( QString utf8Text, char *encodedText, quint64 encodedTextLength )
 {
-    QTextCodec *textCodec = QTextCodec::codecForName("ISO 8859-1");
-    QByteArray encodedTextArray = textCodec->fromUnicode( utf8Text );
+    QStringEncoder textCodec( "ISO 8859-1" );
+    QByteArray encodedTextArray = textCodec.encode( utf8Text );
     strncpy( encodedText, encodedTextArray.data(), encodedTextLength );
 }

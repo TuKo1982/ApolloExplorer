@@ -14,7 +14,6 @@
 #include <QMenu>
 #include <QHeaderView>
 #include <QDialog>
-#include <QRegExp>
 #include "messagepool.h"
 #include "dialogfileinfo.h"
 
@@ -54,7 +53,7 @@ MainWindow::MainWindow( QSharedPointer<QSettings> settings, QSharedPointer<Amiga
     m_OutgoingByteCount( ),
     m_ThroughputTimer( ),
     //m_OpenCLIHereAction( "Open CLI" ),
-    m_Mutex( QMutex::Recursive ),
+    m_Mutex(),
     m_AbortDeleteRequested( false )
 {
     ui->setupUi(this);
@@ -430,7 +429,7 @@ void MainWindow::onBrowserItemsDoubleClickedSlot(QList<QSharedPointer<DirectoryL
             DBGLOG << "Downloading files.";
             //Ask the user where to save the files
             QFileDialog destDialog( this, "Destination for files", localDirPath );
-            destDialog.setFileMode( QFileDialog::DirectoryOnly );
+            destDialog.setFileMode( QFileDialog::Directory );
             int result = destDialog.exec();
             if( result == 0 )
                 return;
@@ -815,7 +814,7 @@ void MainWindow::onDownloadSelectedSlot()
 
     //Ask the user where to save the files
     QFileDialog destDialog( this, "Destination for files", localDirPath );
-    destDialog.setFileMode( QFileDialog::DirectoryOnly );
+    destDialog.setFileMode( QFileDialog::Directory );
     int result = destDialog.exec();
     if( result == 0 )
         return;
