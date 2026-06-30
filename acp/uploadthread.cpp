@@ -1,9 +1,7 @@
 #include "uploadthread.h"
 #include <QDebug>
 #include <QtEndian>
-#include <QApplication>
-#include <QMessageBox>
-
+#include <QCoreApplication>
 #define DEBUG 0
 #include "AEUtils.h"
 
@@ -13,7 +11,7 @@
 
 UploadThread::UploadThread(QObject *parent) :
     QThread(parent),
-    m_Mutex( QMutex::Recursive ),
+    m_Mutex( QRecursiveMutex() ),
     m_ThroughPutTimer( nullptr ),
     m_UploadTimeoutTimer( nullptr ),
     m_ProtocolHandler( nullptr ),
@@ -82,7 +80,7 @@ void UploadThread::run()
     while( m_Keeprunning )
     {
         //Process events
-        QApplication::processEvents();
+        QCoreApplication::processEvents();
 
         //Nothing to send yet?  Just loop around until there is
         RELOCK;
@@ -166,7 +164,7 @@ void UploadThread::run()
 
 
             //Process events
-            QApplication::processEvents();
+            QCoreApplication::processEvents();
         }
 
         //Cleanup
@@ -334,7 +332,7 @@ void UploadThread::onFileChunkReceivedSlot(quint32 chunkNumber)
     //DBGLOG << "Inflight chunk count: " << m_InflightChunks.count();
     if( m_InflightChunks.contains( chunkNumber ) )
     {
-        m_InflightChunks.removeOne( chunkNumber );
+        m_InflightChunks.removeAll( chunkNumber );
     }
     emit startUploadTimeoutTimerSignal();  //Reset timer
 }
