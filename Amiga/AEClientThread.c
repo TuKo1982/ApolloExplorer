@@ -1400,18 +1400,11 @@ static void clientThreadBody()
 
 						if( outFH != 0 )
 						{
-							/* The tags go on to CreateNewProc() (dos.doc), whose defaults are the
-							 * parent's priority and a 4000 byte stack.  This thread runs at 8, so a
-							 * busy command (List ALL DATES, ~40s on a V4) starved the TCP stack at 5
-							 * until connections dropped; and 4000 bytes is little for recursive
-							 * commands.  Run commands like a normal Shell would. */
 							struct TagItem sysTags[] = {
-								{ SYS_Input,    (ULONG)nilFH  },
-								{ SYS_Output,   (ULONG)outFH  },
-								{ SYS_Asynch,   FALSE         },
-								{ NP_Priority,  0             },
-								{ NP_StackSize, 65536         },
-								{ TAG_DONE,     0             }
+								{ SYS_Input,  (ULONG)nilFH  },
+								{ SYS_Output, (ULONG)outFH  },
+								{ SYS_Asynch, FALSE         },
+								{ TAG_DONE,   0             }
 							};
 							shellReturnCode = SystemTagList( shellCommand, sysTags );
 							Close( outFH );
