@@ -20,38 +20,49 @@ DirectoryLister::DirectoryLister( QString ipAddressString, QString path, QObject
 QStringList DirectoryLister::getDirectoryList()
 {
     QStringList dirContents;
+    m_Error.clear();
+    m_Connected = m_ConnectionFailed = m_ListingFailed = m_ListingReceived = false;
+    m_Listing.clear();
+
+    //All handlers write to members and use 'this' as context, so a signal that
+    //arrives after we returned (e.g. the disconnect when the socket is torn down)
+    //can never write into a stack frame that no longer exists.
+    QObject::connect( &m_ProtocolHander, &ProtocolHandler::serverVersionSignal, this, [this]( quint8, quint8, quint8 ) {
+        m_Connected = true;
+    });
+    QObject::connect( &m_ProtocolHander, &ProtocolHandler::disconnectedFromHostSignal, this, [this]() {
+        m_ConnectionFailed = true;
+    });
+    QObject::connect( &m_ProtocolHander, &ProtocolHandler::serverClosedConnectionSignal, this, [this]( QString reason ) {
+        m_ConnectionFailed = true;
+        m_Error = reason;
+    });
+    QObject::connect( &m_ProtocolHander, &ProtocolHandler::newDirectoryListingSignal, this, [this]( QSharedPointer<DirectoryListing> listing ) {
+        m_ListingReceived = true;
+        m_Listing = listing;
+    });
+    //The server answers PMT_FAILED when the path doesn't exist; without this we waited forever
+    QObject::connect( &m_ProtocolHander, &ProtocolHandler::failedWithReasonSignal, this, [this]( QString reason ) {
+        m_ListingFailed = true;
+        m_Error = reason;
+    });
 
     //Connect to the host
     DBGLOG << "Connecting to host";
     m_ProtocolHander.onConnectToHostRequestedSlot( QHostAddress( m_Host ), MAIN_LISTEN_PORTNUMBER );
 
-
-    //Wait for the connect to happen
-    bool connected = false;
-    bool connectionFailed = false;
-    QObject::connect( &m_ProtocolHander, &ProtocolHandler::serverVersionSignal, [&]( quint8 major, quint8 minor, quint8 revision ) {
-        Q_UNUSED( major )
-        Q_UNUSED( minor )
-        Q_UNUSED( revision )
-        connected = true;
-    });
-
-    QObject::connect( &m_ProtocolHander, &ProtocolHandler::disconnectFromHostSignal, [&]() {
-        connectionFailed = true;
-    });
-
     //Perform the wait on the
-    for( int i=0; i< 1000; i++)
+    for( int i=0; i< 1000 && !m_Connected && !m_ConnectionFailed; i++)
     {
-        if( connected ) break;
         QThread::msleep( 10 );
         QCoreApplication::processEvents();
     }
 
     //Did we connected?
-    if( !connected )
+    if( !m_Connected )
     {
-        std::cout << "Couldn't connect to host." << std::endl;
+        if( m_Error.isEmpty() )
+            m_Error = "Couldn't connect to host.";
         return dirContents;
     }
 
@@ -65,7 +76,7 @@ QStringList DirectoryLister::getDirectoryList()
         m_ProtocolHander.onGetVolumeListSlot();
 
         //If we don't have the drive list, lets cycle a few times and see what we get
-        for( int i=0; i < 1000; i++ )
+        for( int i=0; i < 1000 && !m_ConnectionFailed; i++ )
         {
             //Do we have the list of drives already?
             if( m_Volumes.size() > 0 )
@@ -85,25 +96,29 @@ QStringList DirectoryLister::getDirectoryList()
             QThread::msleep( 10 );
             QCoreApplication::processEvents();
         }
+
+        if( m_Error.isEmpty() )
+            m_Error = m_ConnectionFailed ? "Connection to host lost." : "No volume list received from host.";
+        return dirContents;
     }
 
     //Check the user supplied path
     m_ProtocolHander.onGetDirectorySlot( m_Path );
-    //Wait for the hostlist signal to come
-    bool retrivalCompleted = false;
-    QSharedPointer<DirectoryListing> newListing;
-    QVector<QSharedPointer<AmigaHost>> hostList;
-    QObject::connect( &m_ProtocolHander, &ProtocolHandler::newDirectoryListingSignal, [&]( QSharedPointer<DirectoryListing> listing ) {
-        retrivalCompleted = true;
-        newListing = listing;
-    });
 
-    //Perform the wait
-    while( !retrivalCompleted )
+    //Perform the wait (at most 30s - a large directory is still well within that)
+    for( int i = 0; i < 3000 && !m_ListingReceived && !m_ListingFailed && !m_ConnectionFailed; i++ )
     {
         QThread::msleep( 10 );
         QCoreApplication::processEvents();
     }
+
+    if( !m_ListingReceived || m_Listing.isNull() )
+    {
+        if( m_Error.isEmpty() )
+            m_Error = m_ConnectionFailed ? "Connection to host lost." : "No directory listing received from host.";
+        return dirContents;
+    }
+    QSharedPointer<DirectoryListing> newListing = m_Listing;
 
     //Now process the list we got
     for( auto iter = newListing->Entries().begin(); iter != newListing->Entries().end(); iter++ )

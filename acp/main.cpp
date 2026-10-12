@@ -66,16 +66,38 @@ QStringList getHostList( QSharedPointer<QSettings> settings, const QStringList p
     return hosts;
 }
 
+//Split "host:path" at the FIRST ':' only.  The path may then use either the
+//acp form "VOLUME/dir/file" or the Amiga form "VOLUME:dir/file" - splitting on
+//every ':' silently dropped everything after a second one ("host:BOOT:S" became
+//"host:BOOT"), which made an upload land in the root of the volume.
+static void splitRemoteArgument( const QString &argument, QString &host, QString &remotePath )
+{
+    int colon = argument.indexOf( ':' );
+    if( colon < 0 )
+    {
+        host = argument;
+        remotePath.clear();
+        return;
+    }
+    host = argument.left( colon );
+    remotePath = argument.mid( colon + 1 );
+}
+
 bool performDownload( QSharedPointer<QSettings> settings, QStringList arguments, bool recursive )
 {
     //How many arguments do we have?
     QString sourcePath = arguments[ 0 ];
     QString destinationPath = arguments[ 1 ];
 
-    //We need to get the host and remote path out of the last argument
-    QStringList elements = sourcePath.split( ":" );
-    QString host = elements[ 0 ];
-    QString remotePath = elements[ 1 ];
+    //We need to get the host and remote path out of the first argument
+    QString host;
+    QString remotePath;
+    splitRemoteArgument( sourcePath, host, remotePath );
+    if( remotePath.isEmpty() )
+    {
+        std::cerr << "No remote path given in " << sourcePath.toStdString() << "." << std::endl;
+        return false;
+    }
 
     //If the host is already an IP address, no lookup is needed
     static const QRegularExpression ipAddressRegExp( "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$" );
@@ -152,9 +174,14 @@ bool performUpload( QSharedPointer<QSettings> settings, QStringList arguments, b
     QString argN = arguments[ numberOfArguments -1 ];
 
     //We need to get the host and remote path out of the last argument
-    QStringList elements = argN.split( ":" );
-    QString host = elements[ 0 ];
-    QString remotePath = elements[ 1 ];
+    QString host;
+    QString remotePath;
+    splitRemoteArgument( argN, host, remotePath );
+    if( remotePath.isEmpty() )
+    {
+        std::cerr << "No remote path given in " << argN.toStdString() << "." << std::endl;
+        return false;
+    }
 
     //Compost a list of source paths
     QStringList sourcePaths;
@@ -230,22 +257,18 @@ bool performUpload( QSharedPointer<QSettings> settings, QStringList arguments, b
     return true;
 }
 
-QStringList getDirectoryListing( QSharedPointer<QSettings> settings, const QStringList positionArguments )
+bool getDirectoryListing( QSharedPointer<QSettings> settings, const QStringList positionArguments, QStringList &contents )
 {
-    QStringList contents;
     QString host = "";
     QString path = "";
 
     //First we need to extract the hostname out of the first parameter
     QString arg1 = positionArguments[ 0 ];
 
-    //Case 1 - with semi-colon.  The path should be specified as host:path
-    if( arg1.contains( ":" ) && !arg1.endsWith( ":" ) )
+    //The path should be specified as host:path; "host" or "host:" lists the volumes
+    splitRemoteArgument( arg1, host, path );
+    if( !path.isEmpty() && !path.contains( ":" ) )
     {
-        QStringList elements = arg1.split( ":" );
-        host = elements[ 0 ];
-        path = elements [ 1 ];
-
         //Since we are using the ":" character to delimit the host and path
         //we need to replace the first "/" in the path with a ":" because that is the drive!
         if( !path.contains( "/" ) )
@@ -255,17 +278,8 @@ QStringList getDirectoryListing( QSharedPointer<QSettings> settings, const QStri
         {
             path = path.replace( path.indexOf( '/' ), 1, ":" );
         }
-        DBGLOG << "Searching path " << path;
     }
-    else    //All other cases we assume an empty path
-    {
-        //We just have a host
-        host = arg1;
-
-        //Strip any trailing ":"
-        if( host.endsWith( ":" ) )
-            host.chop( 1 );
-    }
+    DBGLOG << "Searching path " << path;
 
     //If the host is already an IP address, no lookup is needed
     static const QRegularExpression ipAddressRegExp( "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$" );
@@ -277,7 +291,7 @@ QStringList getDirectoryListing( QSharedPointer<QSettings> settings, const QStri
         if( hosts.size() != 1 )
         {
             std::cerr << "Either the hostname " << host.toStdString() << " is ambiguous or could not be found." << std::endl;
-            return contents;
+            return false;
         }
 
         //We need the ip address
@@ -285,7 +299,7 @@ QStringList getDirectoryListing( QSharedPointer<QSettings> settings, const QStri
         if( elements.size() != 2 )
         {
             std::cerr << "We couldn't find an IP address for host " << host.toStdString() << "." << std::endl;
-            return contents;
+            return false;
         }
         ipAddressString = elements[ 1 ];
     }
@@ -293,8 +307,13 @@ QStringList getDirectoryListing( QSharedPointer<QSettings> settings, const QStri
     //Now get a directory lister object
     DirectoryLister directoryLister( ipAddressString, path );
     contents = directoryLister.getDirectoryList();
+    if( !directoryLister.errorMessage().isEmpty() )
+    {
+        std::cerr << "Error: " << directoryLister.errorMessage().toStdString() << std::endl;
+        return false;
+    }
 
-    return contents;
+    return true;
 }
 
 int main(int argc, char *argv[])
@@ -331,8 +350,7 @@ int main(int argc, char *argv[])
     //Did we get enough arguments
     if( argc < 2 )
     {
-        cmdParser.showHelp( );
-        return 0;
+        cmdParser.showHelp( 2 );
     }
 
     //Did the user want a list of hosts?
@@ -346,7 +364,7 @@ int main(int argc, char *argv[])
             std::cout << host.toStdString() << std::endl;
         }
 
-        return 0;
+        return hosts.isEmpty() ? 1 : 0;
     }
 
     //Did the user want a directory lsiting
@@ -356,12 +374,14 @@ int main(int argc, char *argv[])
         if( cmdParser.positionalArguments().size() == 0 )
         {
             //Now arguments means no host
-            std::cout << "Need a hostname to query" << std::endl;
-            return -1;
+            std::cerr << "Need a hostname to query" << std::endl;
+            return 2;
         }
 
         //Ok, get the directory listing
-        QStringList contents = getDirectoryListing( settings, cmdParser.positionalArguments() );
+        QStringList contents;
+        if( !getDirectoryListing( settings, cmdParser.positionalArguments(), contents ) )
+            return 1;
         std::cout << "Directory contents" << std::endl;
 
         //Print the directory listing
@@ -387,15 +407,19 @@ int main(int argc, char *argv[])
         //Uploads will have a ":" in the path
         if( argN.contains( ":" ) )
         {
-            performUpload( settings, cmdParser.positionalArguments(), cmdParser.isSet( recursiveOption ) );
+            return performUpload( settings, cmdParser.positionalArguments(), cmdParser.isSet( recursiveOption ) ) ? 0 : 1;
         }
 
         //Downloads will have a ":" in the first argument
         if( arg1.contains( ":" ) )
         {
-            performDownload( settings, cmdParser.positionalArguments(), cmdParser.isSet( recursiveOption ) );
+            return performDownload( settings, cmdParser.positionalArguments(), cmdParser.isSet( recursiveOption ) ) ? 0 : 1;
         }
     }
+
+    //Neither side names an Amiga (host:path), so there is nothing we can do
+    std::cerr << "Either the source or the destination must be an Amiga path (host:VOLUME/path)" << std::endl;
+    return 2;
 
 
    // return app.exec();

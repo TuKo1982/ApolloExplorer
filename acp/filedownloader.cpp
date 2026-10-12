@@ -218,7 +218,14 @@ bool FileDownloader::startDownload()
     //Did we find something to download?
     if( m_DownloadList.isEmpty() && m_RemoteDirectoriesToProcess.isEmpty() )
     {
-        std::cerr << "No files of directories found" << std::endl;
+        //A specific name that isn't there is an error; an empty directory or a
+        //wildcard without matches is not - there was simply nothing to copy.
+        if( m_FileMatchPattern != "*" && !m_FileMatchPattern.contains( "*" ) )
+        {
+            emit downloadAbortedSignal( m_CurrentRemotePath + " not found" );
+            return false;
+        }
+        std::cerr << "No files or directories found" << std::endl;
         return false;
     }
 

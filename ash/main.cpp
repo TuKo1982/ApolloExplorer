@@ -192,13 +192,21 @@ int main( int argc, char *argv[] )
         "Usage:\n"
         "  ash -l                     List available Amiga hosts\n"
         "  ash <host> <command>       Execute a single command and print output\n"
-        "  ash <host>                 Interactive shell: type commands, Ctrl+D to quit" );
+        "  ash <host>                 Interactive shell: type commands, Ctrl+D to quit\n"
+        "\n"
+        "Exit code is the AmigaDOS return code of the (last) command, or\n"
+        "124 when --timeout expired and 125 when the connection was lost." );
     cmdParser.addHelpOption();
     cmdParser.addVersionOption();
+    // Everything after the host belongs to the Amiga command, even if it starts with '-'
+    cmdParser.setOptionsAfterPositionalArgumentsMode( QCommandLineParser::ParseAsPositionalArguments );
 
     const QCommandLineOption listHostOption(
         { "l", "list-hosts" }, "List all available Amiga hosts" );
     cmdParser.addOption( listHostOption );
+    const QCommandLineOption timeoutOption(
+        { "t", "timeout" }, "Give up on a command after <seconds> without completion (default: wait forever)", "seconds" );
+    cmdParser.addOption( timeoutOption );
     cmdParser.addPositionalArgument( "host",    "Amiga hostname or IP address" );
     cmdParser.addPositionalArgument( "command", "Command to execute (optional; interactive if omitted)" );
 
@@ -235,6 +243,18 @@ int main( int argc, char *argv[] )
 
     ShellSession session( ipAddress );
 
+    if( cmdParser.isSet( timeoutOption ) )
+    {
+        bool ok = false;
+        int seconds = cmdParser.value( timeoutOption ).toInt( &ok );
+        if( !ok || seconds < 0 )
+        {
+            std::cerr << "ash: invalid timeout '" << cmdParser.value( timeoutOption ).toStdString() << "'" << std::endl;
+            return 1;
+        }
+        session.setTimeout( seconds );
+    }
+
     std::cout << "Connecting to " << hostArg.toStdString() << " (" << ipAddress.toStdString() << ")..." << std::endl;
     if( !session.connectToHost() )
     {
@@ -262,6 +282,8 @@ int main( int argc, char *argv[] )
             exitCode = session.execute( line );
             if( exitCode != 0 )
                 std::cerr << "[exit code: " << exitCode << "]\n";
+            if( !session.isConnected() )
+                break;
         }
     }
     else
@@ -349,6 +371,8 @@ int main( int argc, char *argv[] )
                         exitCode = session.execute( trimmed );
                         if( exitCode != 0 )
                             std::cerr << "[exit code: " << exitCode << "]\r\n";
+                        if( !session.isConnected() )
+                            break;
                     }
                     lineBuffer.clear();
                     printPrompt();

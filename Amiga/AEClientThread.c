@@ -362,6 +362,12 @@ void startClientThread( struct Library *SocketBase, struct MsgPort *msgPort, SOC
 //thread counter exactly once as our final act before returning into the system.
 static void clientThread()
 {
+	//Nobody sits at the Amiga to answer a DOS requester ("Please insert volume ..."):
+	//it would block this connection until clicked away.  With pr_WindowPtr = -1 the
+	//DOS call fails with an error instead, and shell commands run via SystemTagList
+	//inherit the setting.  The process ends with us, so there is nothing to restore.
+	((struct Process *)FindTask( NULL ))->pr_WindowPtr = (APTR)-1;
+
 	clientThreadBody();
 	Forbid(); g_ActiveThreadCount--; Permit();
 }

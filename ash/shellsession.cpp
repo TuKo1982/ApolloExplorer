@@ -4,6 +4,7 @@
 #include <QThread>
 #include <QCoreApplication>
 #include <QtEndian>
+#include <QElapsedTimer>
 
 #define DEBUG 0
 #include "AEUtils.h"
@@ -14,6 +15,8 @@ ShellSession::ShellSession( QString ipAddressString, QObject *parent )
       m_Host( ipAddressString ),
       m_ProtocolHandler( this ),
       m_CommandDone( false ),
+      m_ConnectionLost( false ),
+      m_TimeoutSeconds( 0 ),
       m_ReturnCode( 0 ),
       m_CompletionDone( false )
 {
@@ -23,6 +26,13 @@ ShellSession::ShellSession( QString ipAddressString, QObject *parent )
              this, &ShellSession::onShellDoneSlot, Qt::DirectConnection );
     connect( &m_ProtocolHandler, &ProtocolHandler::shellCompleteRspSignal,
              this, &ShellSession::onShellCompleteRspSlot, Qt::DirectConnection );
+
+    // Without these, a server that rejects the command or drops the connection
+    // leaves execute() waiting forever for a PMT_SHELL_DONE that never comes.
+    connect( &m_ProtocolHandler, &ProtocolHandler::serverClosedConnectionSignal,
+             this, &ShellSession::onServerClosedConnectionSlot, Qt::DirectConnection );
+    connect( &m_ProtocolHandler, &ProtocolHandler::disconnectedFromHostSignal,
+             this, &ShellSession::onDisconnectedSlot, Qt::DirectConnection );
 }
 
 bool ShellSession::connectToHost()
@@ -56,6 +66,12 @@ int ShellSession::execute( const QString &command )
     m_CommandDone = false;
     m_ReturnCode = 0;
 
+    if( m_ConnectionLost )
+    {
+        std::cerr << "ash: not connected to " << m_Host.toStdString() << std::endl;
+        return ASH_EXIT_CONNECTION_LOST;
+    }
+
     QByteArray encodedCommand = command.toLatin1();
     int cmdLen = encodedCommand.size() + 1;
     int msgLen = sizeof( ProtocolMessage_t ) + cmdLen;
@@ -70,11 +86,21 @@ int ShellSession::execute( const QString &command )
 
     m_ProtocolHandler.sendMessage( msg );
 
-    while( !m_CommandDone )
+    QElapsedTimer timer;
+    timer.start();
+    bool timedOut = false;
+
+    while( !m_CommandDone && !m_ConnectionLost )
     {
         for( const QByteArray &chunk : m_PendingOutput )
             std::cout.write( chunk.constData(), chunk.size() );
         m_PendingOutput.clear();
+
+        if( m_TimeoutSeconds > 0 && timer.elapsed() >= qint64( m_TimeoutSeconds ) * 1000 )
+        {
+            timedOut = true;
+            break;
+        }
 
         QThread::msleep( 10 );
         QCoreApplication::processEvents();
@@ -85,7 +111,23 @@ int ShellSession::execute( const QString &command )
     m_PendingOutput.clear();
     std::cout.flush();
 
-    return m_ReturnCode;
+    if( m_CommandDone )
+        return m_ReturnCode;
+
+    if( timedOut )
+    {
+        // The command may still be running on the Amiga; its output is abandoned.
+        std::cerr << "ash: no reply from " << m_Host.toStdString() << " within "
+                  << m_TimeoutSeconds << "s, giving up." << std::endl;
+        m_ConnectionLost = true;
+        return ASH_EXIT_TIMEOUT;
+    }
+
+    std::cerr << "ash: connection to " << m_Host.toStdString() << " closed before the command finished";
+    if( !m_CloseReason.isEmpty() )
+        std::cerr << ": " << m_CloseReason.toStdString();
+    std::cerr << std::endl;
+    return ASH_EXIT_CONNECTION_LOST;
 }
 
 QStringList ShellSession::requestCompletion( const QString &partialToken )
@@ -104,7 +146,7 @@ QStringList ShellSession::requestCompletion( const QString &partialToken )
 
     m_ProtocolHandler.sendMessage( msg );
 
-    for( int i = 0; i < 500 && !m_CompletionDone; i++ )
+    for( int i = 0; i < 500 && !m_CompletionDone && !m_ConnectionLost; i++ )
     {
         QThread::msleep( 10 );
         QCoreApplication::processEvents();
@@ -130,4 +172,15 @@ void ShellSession::onShellCompleteRspSlot( QStringList completions )
 {
     m_Completions = completions;
     m_CompletionDone = true;
+}
+
+void ShellSession::onServerClosedConnectionSlot( QString reason )
+{
+    m_CloseReason = reason;
+    m_ConnectionLost = true;
+}
+
+void ShellSession::onDisconnectedSlot()
+{
+    m_ConnectionLost = true;
 }

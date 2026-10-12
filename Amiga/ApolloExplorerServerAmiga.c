@@ -15,7 +15,7 @@
 #include "AEDiscoveryThread.h"
 #include "wbicon.h"
 
-UBYTE *ver = "\0$VER: ApolloExplorerSrv " VERSION_STRING;
+UBYTE *ver = "\0$VER: ApolloExplorerSrv " VERSION_STRING " (12.10.2026)";
 
 struct Library *SocketBase = NULL;
 

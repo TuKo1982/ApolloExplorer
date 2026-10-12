@@ -85,64 +85,68 @@ void DeviceDiscovery::onScanTimerTimeoutSlot()
 
 void DeviceDiscovery::onSocketReadReadySlot()
 {
-    ProtocolMessage_DeviceAnnouncement_t message;
-    QHostAddress sender;
-
-
-    //Get the arriving datagram
-    quint64 bytesRead = m_Socket.readDatagram( reinterpret_cast< char* >( &message ), sizeof( message ), &sender );
-
-    //endian conversion
-    message.header.token = qFromBigEndian<quint32>( message.header.token );
-    message.header.type = qFromBigEndian<quint32>( message.header.type );
-    message.header.length = qFromBigEndian<quint32>( message.header.length );
-
-    //It needs to be the right size
-    if( bytesRead != sizeof( message ) )
+    //readyRead is not repeated for datagrams that are already queued, so drain them all.
+    //Reading only one per signal let discovery requests from other clients (12 bytes each)
+    //pile up in front of the announcements, which then arrived after the scan had ended.
+    while( m_Socket.hasPendingDatagrams() )
     {
-        //DBGLOG << "Ignoring datagrame of size " << bytesRead << " from host " << sender;
-        return;
+        ProtocolMessage_DeviceAnnouncement_t message;
+        QHostAddress sender;
+
+
+        //Get the arriving datagram
+        qint64 bytesRead = m_Socket.readDatagram( reinterpret_cast< char* >( &message ), sizeof( message ), &sender );
+
+        //endian conversion
+        message.header.token = qFromBigEndian<quint32>( message.header.token );
+        message.header.type = qFromBigEndian<quint32>( message.header.type );
+        message.header.length = qFromBigEndian<quint32>( message.header.length );
+
+        //It needs to be the right size
+        if( bytesRead != sizeof( message ) )
+        {
+            //DBGLOG << "Ignoring datagrame of size " << bytesRead << " from host " << sender;
+            continue;
+        }
+
+        //It also needs to have a token
+        if( message.header.token != MAGIC_TOKEN )
+        {
+            DBGLOG << "Ignoring datagram with token " << QByteArray( reinterpret_cast< char* >( &message.header.token ), 4 ).toHex() << " from host " << sender;
+            continue;
+        }
+
+        //The type needs to be right as well
+        if( message.header.type != PMT_DEVICE_ANNOUNCE )
+        {
+            DBGLOG << "Ignoring datagram with type " << message.header.type << " from host " << sender;
+            continue;
+        }
+
+        //Otherwise we are good to go
+        QString name( message.name );
+        QString osName( message.osName );
+        QString osVersion( message.osVersion );
+        QString hardware( message.hardware );
+
+        LOCK;
+
+        //Does this IP Address exist in the database already?
+        QString senderAddressString = sender.toString();
+        if( !m_HostList.contains( senderAddressString ) )
+        {
+            //add this to the list
+            AmigaHost *host = new AmigaHost( m_Settings, name, osName, osVersion, hardware, sender, this );
+            m_HostList[ senderAddressString ] = QSharedPointer<AmigaHost>( host );
+
+            //Tell the world about this
+            DBGLOG << "Server " << name << " (OS: " << osName << " ver: " << osVersion << ") is online.";
+            emit hostAliveSignal( m_HostList[ senderAddressString ] );
+
+            continue;
+        }
+
+        //Update the timestamp
+        m_HostList[ senderAddressString ]->setHostRespondedNow();
     }
-
-    //It also needs to have a token
-    if( message.header.token != MAGIC_TOKEN )
-    {
-        DBGLOG << "Ignoring datagram with token " << QByteArray( reinterpret_cast< char* >( &message.header.token ), 4 ).toHex() << " from host " << sender;
-        return;
-    }
-
-    //The type needs to be right as well
-    //It also needs to have a token
-    if( message.header.type != PMT_DEVICE_ANNOUNCE )
-    {
-        DBGLOG << "Ignoring datagram with type " << QByteArray( reinterpret_cast< char* >( message.header.type ) ) << " from host " << sender;
-        return;
-    }
-
-    //Otherwise we are good to go
-    QString name( message.name );
-    QString osName( message.osName );
-    QString osVersion( message.osVersion );
-    QString hardware( message.hardware );
-
-    LOCK;
-
-    //Does this IP Address exist in the database already?
-    QString senderAddressString = sender.toString();
-    if( !m_HostList.contains( senderAddressString ) )
-    {
-        //add this to the list
-        AmigaHost *host = new AmigaHost( m_Settings, name, osName, osVersion, hardware, sender, this );
-        m_HostList[ senderAddressString ] = QSharedPointer<AmigaHost>( host );
-
-        //Tell the world about this
-        DBGLOG << "Server " << name << " (OS: " << osName << " ver: " << osVersion << ") is online.";
-        emit hostAliveSignal( m_HostList[ senderAddressString ] );
-
-        return;
-    }
-
-    //Update the timestamp
-    m_HostList[ senderAddressString ]->setHostRespondedNow();
 }
-
