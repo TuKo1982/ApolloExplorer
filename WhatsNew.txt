@@ -11,6 +11,7 @@ Bug fixes for "ash"
  - ash no longer hangs when the server rejects a command or the connection drops.  It reports the server's reason and exits with code 125.
  - New option -t/--timeout <seconds>: give up on a command that does not complete in time (exit code 124).
  - Arguments after the host are always passed to the Amiga command, even when they start with '-'.
+ - The server ends a client thread as soon as the client disconnects.  Before, every finished acp/ash call left a thread running for about a minute, and a burst of short calls could pile up dozens of them (seen to freeze a V4).
  - The server no longer blocks on DOS requesters such as "Please insert volume": a missing volume now returns an error to acp/ash/GUI.
  - The Amiga server now reports its real version (1.4.1) to clients; it reported 1.3.0 before.  $VER strings include the build date.
 

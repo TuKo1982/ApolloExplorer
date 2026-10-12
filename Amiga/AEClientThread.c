@@ -649,6 +649,27 @@ static void clientThreadBody()
 				}
 			}
 
+			//A socket that is readable with nothing to read means the client closed the
+			//connection.  Without this check the thread lingered ~60s after every finished
+			//acp call (until the second inactivity ping failed), and a burst of short
+			//connections piled up dozens of threads with their sockets and buffers.
+			{
+				fd_set eofSet __attribute__((aligned(4)));
+				struct timeval noWait = { 0, 0 };
+				FD_ZERO( &eofSet );
+				FD_SET( newClientSocket, &eofSet );
+				if( WaitSelect( newClientSocket + 1, &eofSet, NULL, NULL, &noWait, NULL ) > 0 )
+				{
+					IoctlSocket( newClientSocket, FIONREAD, &bytesAvailable );
+					if( bytesAvailable == 0 )
+					{
+						dbglog( "[child] Client closed the connection.\n" );
+						keepThisConnectionRunning = 0;
+						continue;
+					}
+				}
+			}
+
 			//Check if we have reached the inactivity limit
 			if( inactivityCount-- == 0 )
 			{
