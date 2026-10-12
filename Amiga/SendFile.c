@@ -207,7 +207,11 @@ FileSendContext_t *allocateFileSendContext()
 	context->acknowledgeMessage->header.type = PMT_ACK;
 
 	//Allocate the start of send message
-	context->startOfFilesendMessage = ( ProtocolMessage_StartOfFileSend_t* )AllocVec( MAX_MESSAGE_LENGTH , MEMF_FAST|MEMF_CLEAR ) + MAX_FILEPATH_LENGTH + 1;
+	//MAX_MESSAGE_LENGTH leaves ample room for the trailing file path.  (This used to add
+	//MAX_FILEPATH_LENGTH + 1 to the struct pointer, i.e. 257 structs into the block, and
+	//freeFileSendContext() then called FreeVec() on that interior pointer: "Memory header
+	//not located" / a corrupted free list at the end of every client thread.)
+	context->startOfFilesendMessage = ( ProtocolMessage_StartOfFileSend_t* )AllocVec( MAX_MESSAGE_LENGTH , MEMF_FAST|MEMF_CLEAR );
 	context->startOfFilesendMessage->header.token = MAGIC_TOKEN;
 	context->startOfFilesendMessage->header.length = sizeof( ProtocolMessage_StartOfFileSend_t ) + MAX_FILEPATH_LENGTH + 1;
 	context->startOfFilesendMessage->header.type = PMT_START_OF_SEND_FILE;
@@ -233,4 +237,5 @@ void freeFileSendContext( FileSendContext_t *context )
 	FreeVec( context->acknowledgeMessage );
 	FreeVec( context->startOfFilesendMessage );
 	FreeVec( context->fileChunkMessage );
+	FreeVec( context );
 }
