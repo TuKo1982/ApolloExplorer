@@ -135,7 +135,9 @@ void DownloadThread::onStartFileSlot(QString localFilePath, QString remoteFilePa
 
     DBGLOG << "Opening local file " << m_LocalFilePath;
     m_LocalFile.setFileName( m_LocalFilePath );
-    if( !m_LocalFile.open( QFile::ReadWrite ) || !m_LocalFile.isWritable() || !m_LocalFile.isOpen() )
+    //Truncate: ReadWrite alone writes over an existing file without shortening it, so a
+    //download that is smaller than the local copy kept the old file's tail.
+    if( !m_LocalFile.open( QFile::WriteOnly | QFile::Truncate ) || !m_LocalFile.isWritable() || !m_LocalFile.isOpen() )
     {
         QString errorMessage = m_LocalFile.errorString();
         cleanup();
