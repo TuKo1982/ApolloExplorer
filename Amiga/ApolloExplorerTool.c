@@ -12,7 +12,7 @@
 #include <clib/exec_protos.h>
 #include <clib/dos_protos.h>
 
-UBYTE *ver = "\0$VER: ApolloExplorerTool " VERSION_STRING " (12.10.2026)";
+UBYTE *ver = "\0$VER: ApolloExplorerTool " VERSION_STRING " (13.10.2026)";
 
 typedef enum
 {

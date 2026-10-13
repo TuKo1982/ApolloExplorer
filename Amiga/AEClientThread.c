@@ -119,7 +119,10 @@ void removeClientThreadFromList( ClientThread_t *client )
 	{
 		ClientThread_t *nextNode = node->next;
 		ClientThread_t *previousNode = node->previous;
-		if( node == client || node->process == client->process )
+		//Match on the entry itself only.  AmigaOS reuses Process addresses, so matching on
+		//the process could unlink and free a different (stale) entry while leaving this
+		//one linked with NULLed pointers.
+		if( node == client )
 		{
 			//We found the node in question.
 			//Relink the nodes before and after this node with each other
@@ -309,6 +312,32 @@ void startClientThread( struct Library *SocketBase, struct MsgPort *msgPort, SOC
 		}
 		dbglog( "[master] Got the listen port for the new client %d.\n", clientPort );
 
+		//Generate a new client entry.  Register it BEFORE replying: the reply releases the
+		//child, and a child whose client never reconnects removes itself from the list
+		//within seconds.  Adding the entry after that left a stale entry behind, pointing
+		//at the exited child's deleted message port.
+		ClientThread_t *clientThread = AllocVec( sizeof( *clientThread ), MEMF_CLEAR|MEMF_FAST );
+		if( clientThread != NULL )
+		{
+			clientThread->process = clientProcess;
+			clientThread->port = clientPort;
+			clientThread->messagePort = clientMessage->mn_ReplyPort;
+
+			//Get the peer name
+			struct sockaddr_in name;
+			socklen_t nameLen = sizeof( name );
+			getpeername( clientSocket, (struct sockaddr *)&name, &nameLen );
+			memcpy( clientThread->ip, &name.sin_addr.s_addr, 4 );
+			dbglog( "[Master] created thread for IP %u.%u.%u.%u:%d\n", 
+										(UBYTE)clientThread->ip[ 0 ],
+										(UBYTE)clientThread->ip[ 1 ],
+										(UBYTE)clientThread->ip[ 2 ],
+										(UBYTE)clientThread->ip[ 3 ],
+										clientThread->port );
+
+			addClientThreadToList( clientThread );
+		}
+
 		//Send a reply
 		ReplyMsg( (struct Message*)newClientMessage );
 		dbglog( "[master] Reply to child.\n" );
@@ -331,25 +360,6 @@ void startClientThread( struct Library *SocketBase, struct MsgPort *msgPort, SOC
 			dbglog( "[master] Only sent %d bytes of %d.\n", bytesSent, reconnectMessage.header.length );
 		}		
 
-		//Generate a new client entry
-		ClientThread_t *clientThread = AllocVec( sizeof( *clientThread ), MEMF_CLEAR|MEMF_FAST );
-		clientThread->process = clientProcess;
-		clientThread->port = clientPort;
-		clientThread->messagePort = clientMessage->mn_ReplyPort;
-
-		//Get the peer name
-		struct sockaddr_in name;
-		socklen_t nameLen = sizeof( name );
-		getpeername( clientSocket, (struct sockaddr *)&name, &nameLen );
-		memcpy( clientThread->ip, &name.sin_addr.s_addr, 4 );
-		dbglog( "[Master] created thread for IP %u.%u.%u.%u:%d\n", 
-									(UBYTE)clientThread->ip[ 0 ],
-									(UBYTE)clientThread->ip[ 1 ],
-									(UBYTE)clientThread->ip[ 2 ],
-									(UBYTE)clientThread->ip[ 3 ],
-									clientThread->port );
-
-		addClientThreadToList( clientThread );
 		dbglog( "[master] Done handling the new inbound connection.\n" );
 
 		CloseSocket( clientSocket );
@@ -380,6 +390,15 @@ static void clientThreadBody()
 	struct sockaddr_in addr __attribute__((aligned(4))) ;
 	LONG returnCode = 0;
 	unsigned short newPort = g_NextClientPort++;		//Here we will also store our client port
+
+	//Everything exit_child frees.  These must be set before the first goto exit_child (the
+	//reconnect timeout); jumping past their initialisation made the exit path FreeVec()
+	//and UnLock() stack garbage: "Memory header not located" in AEClientThread.
+	ProtocolMessage_t *message __attribute__((aligned(4))) = NULL;
+	FileSendContext_t *fileSendContext = NULL;
+	FileReceiveContext_t *fileReceiveContext = NULL;
+	DeleteContext_t *deleteContext = NULL;
+	BPTR cdLock = 0;		//Current directory lock for this shell session (0 = use task default)
 
 	//saftey check for the port number
 	if( g_NextClientPort > 50000 ) g_NextClientPort = 40000;
@@ -594,19 +613,24 @@ static void clientThreadBody()
 
 
 	//Let's reserve some memory for each of the messages
-	ProtocolMessage_t *message __attribute__((aligned(4))) = AllocVec( MAX_MESSAGE_LENGTH, MEMF_FAST|MEMF_CLEAR );
+	message = AllocVec( MAX_MESSAGE_LENGTH, MEMF_FAST|MEMF_CLEAR );
 
-	//Create a filesend context
-	FileSendContext_t *fileSendContext = allocateFileSendContext();
-
-	//Current directory lock for this shell session (0 = use task default)
-	BPTR cdLock = 0;
+	//Create the per-connection file transfer and delete contexts.  These hold all state
+	//of an operation, so concurrent clients never share a file handle, anchor or message.
+	fileSendContext = allocateFileSendContext();
+	fileReceiveContext = allocateFileReceiveContext();
+	deleteContext = allocateDeleteContext();
 
 	//Start reading all inbound messages
 	int bytesRead = 0;
 	volatile char keepThisConnectionRunning = 1;
 	LONG bytesAvailable = 0;
 	LONG inactivityCount = 300;
+	if( message == NULL || fileSendContext == NULL || fileReceiveContext == NULL || deleteContext == NULL )
+	{
+		dbglog( "[child] Out of memory setting up the connection.  Closing it.\n" );
+		keepThisConnectionRunning = 0;
+	}
 	while( keepThisConnectionRunning && g_KeepServerRunning )
 	{
 
@@ -785,6 +809,7 @@ static void clientThreadBody()
 					break;
 				}
 				sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)list );
+				FreeVec( list );
 				break;
 			}
 			case PMT_GET_FILE:
@@ -869,7 +894,7 @@ static void clientThreadBody()
 					{
 						dbglog( "[child] error sending file chunk (error %d).  Abondoning connection.\n", bytesSent )
 						{
-							cleanupFileReceive();
+							cleanupFileSend( fileSendContext );
 							keepThisConnectionRunning = FALSE;
 							break;
 						}
@@ -933,7 +958,7 @@ static void clientThreadBody()
 				strncpy( filePath, filePutMessage->filePath, MAX_FILEPATH_LENGTH );
 
 				//We need to check that we can write the requested file
-				ProtocolMessage_Ack_t *acknowledgeMessage = requestFileReceive( filePath );
+				ProtocolMessage_Ack_t *acknowledgeMessage = requestFileReceive( filePath, fileReceiveContext );
 				int bytesSent = sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)acknowledgeMessage );
 				(void)bytesSent;
 				//dbglog( "[child] %d bytes sent during sending of ACK.\n", bytesSent );
@@ -965,19 +990,19 @@ static void clientThreadBody()
 					dbglog( "[child] Expected a Start-of-Filesend message.  But that didn't arrive.  Aborting.\n" );
 					dbglog( "[child] Token 0x%08x Type 0x%08x Length %04u\n", message->token, message->type, message->length );
 					sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)&ackMessage );
-					cleanupFileReceive();
+					cleanupFileReceive( fileReceiveContext );
 					break;
 				}
 				
 				ProtocolMessage_StartOfFileSend_t *startOfFileSend = ( ProtocolMessage_StartOfFileSend_t* )message;
 				dbglog( "[child] PutStartOfFileReceive address: 0x%08x ChunkCount %d Filesize %d\n", (unsigned int)startOfFileSend, startOfFileSend->numberOfFileChunks, startOfFileSend->fileSize );
-				putStartOfFileReceive( startOfFileSend );
+				putStartOfFileReceive( startOfFileSend, fileReceiveContext );
 
 				//Special Case.  If the file is zero bytes
 				if( startOfFileSend->numberOfFileChunks == 0 )
 				{
 					dbglog( "[child] Empty file sent.\n" );
-					cleanupFileReceive();
+					cleanupFileReceive( fileReceiveContext );
 					break;
 				}
 
@@ -995,7 +1020,7 @@ static void clientThreadBody()
 					if( !g_KeepServerRunning )
 					{
 						dbglog( "[child] Server shutting down, aborting file receive.\n" );
-						cleanupFileReceive();
+						cleanupFileReceive( fileReceiveContext );
 						keepThisConnectionRunning = 0;
 						goto exit_child;
 					}
@@ -1021,7 +1046,7 @@ static void clientThreadBody()
 						dbglog( "[child] There was a timeout on recieving file chunks from the client.  Terminating the conection.\n" );
 						ackMessage.response = 0;
 						sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)&ackMessage );
-						cleanupFileReceive();
+						cleanupFileReceive( fileReceiveContext );
 						keepThisConnectionRunning = 0;
 						goto exit_child;
 					}
@@ -1034,7 +1059,7 @@ static void clientThreadBody()
 					if( message->type == PMT_CANCEL_OPERATION )
 					{
 						dbglog( "[child] Received a cancel notification from the client.  Aborting.\n" );
-						cleanupFileReceive();
+						cleanupFileReceive( fileReceiveContext );
 						break;
 					}
 
@@ -1042,14 +1067,14 @@ static void clientThreadBody()
 					if(  bytesReceived < message->length || message->type != 0x00000011 )
 					{
 						dbglog( "[child] Received an invalid message awaiting a file chunk.  Aborting.\n" );
-						filePutConfirm.filesize = getBytesWritenToFile();
+						filePutConfirm.filesize = getBytesWritenToFile( fileReceiveContext );
 						sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)&filePutConfirm );	//Send back what we got until now
-						cleanupFileReceive();
+						cleanupFileReceive( fileReceiveContext );
 						break;
 					}
 
 					ProtocolMessage_FileChunk_t *fileChunkMessage = ( ProtocolMessage_FileChunk_t* )message;
-					chunksRemaining = putNextFileSendChunk( fileChunkMessage );
+					chunksRemaining = putNextFileSendChunk( fileChunkMessage, fileReceiveContext );
 					fileChunkConfMessage.chunkNumber = fileChunkMessage->chunkNumber;
 					sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)&fileChunkConfMessage );	//Send an ack back
 					dbglog( "[child] Got file chunk %d.  Chunks remaining: %d\r", fileChunkMessage->chunkNumber, chunksRemaining );
@@ -1057,14 +1082,14 @@ static void clientThreadBody()
 				}while( chunksRemaining );
 
 				//Send the confirmation and cleanup
-				unsigned int bytesWritten = getBytesWritenToFile();
+				unsigned int bytesWritten = getBytesWritenToFile( fileReceiveContext );
 				filePutConfirm.filesize = bytesWritten;
 				sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)&filePutConfirm );	//Send back what we got until now
 				dbglog( "\n[child] File receive completed (%u bytes).\n", bytesWritten );
 				
 
 				//We are done
-				cleanupFileReceive();
+				cleanupFileReceive( fileReceiveContext );
 				Delay( 2 );
 				break;
 			}
@@ -1076,7 +1101,7 @@ static void clientThreadBody()
 				//If we are just deleting a file
 				if( deleteMessage->entryType == DET_FILE )
 				{
-					ProtocolMessage_PathDeleted_t *msg = deleteFile( deleteMessage->filePath );
+					ProtocolMessage_PathDeleted_t *msg = deleteFile( deleteMessage->filePath, deleteContext );
 					sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)msg );
 					//dbglog( "[child] Delete of %s was %s", deleteMessage->filePath, msg->deleteSucceeded == 0 ? "unsuccessful" : "successful" );
 				}
@@ -1085,50 +1110,50 @@ static void clientThreadBody()
 					ULONG deleteRetryCount = 30;
 					BOOL deleteFailures = FALSE;
 
-					if( !startRecursiveDelete( deleteMessage->filePath ) )
+					if( !startRecursiveDelete( deleteMessage->filePath, deleteContext ) )
 					{
 						dbglog( "[child] Recursive delete started.\n" );
 						ProtocolMessage_PathDeleted_t *msg = NULL;
-						while( ( msg = getNextFileDeleted() ) )
+						while( ( msg = getNextFileDeleted( deleteContext ) ) )
 						{
 							//dbglog( "[child] Deleted %s %s\r", msg->filePath, msg->deleteSucceeded == 0 ? "unsuccessfully" : "successfully" );
 							if( msg->deleteSucceeded == 0 )	deleteFailures = TRUE;
 							sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)msg );
 						}
-						endRecursiveDelete();
+						endRecursiveDelete( deleteContext );
 
 						//If there were some failures try again
 						while( deleteFailures == TRUE && deleteRetryCount-- > 0 )
 						{
 							Delay( 10 );
 							deleteFailures = FALSE;
-							if( !startRecursiveDelete( deleteMessage->filePath ) )
+							if( !startRecursiveDelete( deleteMessage->filePath, deleteContext ) )
 							{
 								dbglog( "[child] Had some failures so we are trying again.\n" );
 								ProtocolMessage_PathDeleted_t *msg = NULL;
-								while( ( msg = getNextFileDeleted() ) )
+								while( ( msg = getNextFileDeleted( deleteContext ) ) )
 								{
 									//dbglog( "[child] Deleted %s %s\r", msg->filePath, msg->deleteSucceeded == 0 ? "unsuccessfully" : "successfully" );
 									if( msg->deleteSucceeded == 0 )	deleteFailures = TRUE;
 									sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)msg );
 								}
-								endRecursiveDelete();
+								endRecursiveDelete( deleteContext );
 							}else
 							{
-								endRecursiveDelete();
+								endRecursiveDelete( deleteContext );
 								break;
 							}
 						}
 
 						//Now send completion message
-						msg = getRecusiveDeleteCompletedMessage();
+						msg = getRecusiveDeleteCompletedMessage( deleteContext );
 						sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)msg );
 						dbglog( "[child] Recursive delete completed.\n" );
 					}else
 					{
-						endRecursiveDelete();
+						endRecursiveDelete( deleteContext );
 						dbglog( "[child] Failed to start recursive delete of %s\n", deleteMessage->filePath );
-						ProtocolMessage_PathDeleted_t *msg = getDeleteError();
+						ProtocolMessage_PathDeleted_t *msg = getDeleteError( deleteContext );
 						sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)msg );
 					}
 
@@ -1149,6 +1174,7 @@ static void clientThreadBody()
 				//Perform the rename
 				Rename( (STRPTR)oldName, (STRPTR)newName );
 				dbglog( "[child] Renamed '%s' to '%s'.\n", oldName, newName );
+				break;
 			}
 			case PMT_MKDIR:
 			{
@@ -1194,6 +1220,7 @@ static void clientThreadBody()
 
 				//Send the list
 				sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)volumeListMessage );
+				FreeVec( volumeListMessage );
 				break;
 			}
 			case PMT_RUN:
@@ -1615,8 +1642,10 @@ exit_child: ;
 		sendMessage( SocketBase, newClientSocket, (ProtocolMessage_t*)&disconnectMessage );
 	}
 
-	//Free the file send context
+	//Free the file transfer and delete contexts
 	freeFileSendContext( fileSendContext );
+	freeFileReceiveContext( fileReceiveContext );
+	freeDeleteContext( deleteContext );
 
 	//Remove this client from the list
 	dbglog( "[client] Locking the client list.\n" );

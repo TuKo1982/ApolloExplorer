@@ -10,6 +10,7 @@
 
 #include "protocolTypes.h"
 
+//Returns a newly allocated message (or NULL).  The caller must FreeVec() it.
 ProtocolMessage_VolumeList_t *getVolumeList();
 
 #endif /* AMIGA_VOLUMELIST_H_ */

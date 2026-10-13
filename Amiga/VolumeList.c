@@ -23,14 +23,12 @@
 #define DBGOUT 0
 #include "AEUtil.h"
 
-#define VOL_MSG_LENGTH MAX_MESSAGE_LENGTH*5
-static ProtocolMessage_VolumeList_t *vlistMessage = NULL;
-
 
 ProtocolMessage_VolumeList_t *getVolumeList()
 {
 	unsigned int volumeNameLength = 0;
 	char volumeName[ 128 ] __attribute__((aligned(4)))= "";
+	ProtocolMessage_VolumeList_t *vlistMessage = NULL;
 
 	dbglog( "[getVolumeList] Getting the list of volumes.\n" );
 
@@ -79,8 +77,16 @@ ProtocolMessage_VolumeList_t *getVolumeList()
 
 	//Now create a the Volume List message
 	unsigned int messageLength = sizeof( ProtocolMessage_VolumeList_t ) + ( volumeCount * sizeof( VolumeEntry_t ) ) + stringSize;
-	if( vlistMessage == NULL ) vlistMessage = (ProtocolMessage_VolumeList_t*)AllocVec( VOL_MSG_LENGTH, MEMF_FAST|MEMF_CLEAR );
-	memset( vlistMessage, 0, VOL_MSG_LENGTH );
+	//Every call gets its own message (the caller FreeVec's it after sending): client
+	//threads ask for the volume list concurrently, so a shared buffer was rewritten mid-send.
+	vlistMessage = (ProtocolMessage_VolumeList_t*)AllocVec( messageLength, MEMF_FAST|MEMF_CLEAR );
+	if( vlistMessage == NULL )
+	{
+		dbglog( "[getVolumeList] Unable to allocate %d bytes for the volume list.\n", messageLength );
+		return NULL;
+	}
+	char *endOfMessageMemory = ((char*)vlistMessage) + messageLength;
+	unsigned int volumesAdded = 0;
 	vlistMessage->header.token = MAGIC_TOKEN;
 	vlistMessage->header.type = PMT_VOLUME_LIST;
 	vlistMessage->header.length = messageLength;
@@ -110,8 +116,13 @@ ProtocolMessage_VolumeList_t *getVolumeList()
 		if( dosList->dol_Type != DLT_VOLUME )
 		{
 			//dbglog( "[getVolumeList] Ignoring entry '%s' which is of type 0x%08x.\n", volumeName, dosList->dol_Type );
+		}else if( volumesAdded >= volumeCount || ((char*)volumeEntry) + sizeof( VolumeEntry_t ) + volumeNameLength > endOfMessageMemory )
+		{
+			//A volume appeared between the counting pass and this one.  It doesn't fit.
+			dbglog( "[getVolumeList] No room left in the message for '%s'.  Ignoring.\n", volumeName );
 		}else
 		{
+			volumesAdded++;
 			dbglog( "[getVolumeList] ================================================================\n" );
 			dbglog( "[getVolumeList] VolumeEntry address: 0x%08x.\n", (unsigned int)volumeEntry );
 			dbglog( "[getVolumeList] Adding entry '%s' which is of type 0x%08x.\n", volumeName, (unsigned int)dosList->dol_Type );
@@ -157,7 +168,7 @@ ProtocolMessage_VolumeList_t *getVolumeList()
 			//Prepare the next entry
 			dbglog( "[getVolumeList] Strlen is: %d.\n", volumeNameLength );
 			dbglog( "[getVolumeList] Entry size is: %d (%x) .\n", volumeEntry->entrySize, volumeEntry->entrySize  );
-			volumeEntry = (VolumeEntry_t*)(((char*)volumeEntry) + ((char)volumeEntry->entrySize));
+			volumeEntry = (VolumeEntry_t*)(((char*)volumeEntry) + volumeEntry->entrySize);
 			dbglog( "[getVolumeList] New volumeEntry address: 0x%08x.\n", (unsigned int)volumeEntry );
 			dbglog( "[getVolumeList] ================================================================\n" );
 		}
@@ -168,6 +179,9 @@ ProtocolMessage_VolumeList_t *getVolumeList()
 		dosList = NextDosEntry( dosList, LDF_VOLUMES );
 	}
 	UnLockDosList( LDF_VOLUMES|LDF_READ );
+
+	//A volume can also disappear between the two passes.  Only report what we filled in.
+	vlistMessage->volumeCount = volumesAdded;
 
 	//Now return this message
 	return vlistMessage;

@@ -1,6 +1,14 @@
 IMPORTANT:Make sure you update the server binary on your Amiga BEFORE you use the new client.   All sorts of a interesting things might happen if you don't.
 
-Updates in Version 1.4.1
+Updates in Version 1.4.2
+Bug fixes for the Amiga server
+ - Fixed the "Memory header not located" alert (Task AEClientThread) under load, such as uploading many files or a recursive acp download.  Several clients connected at the same time shared the buffers and file handles of directory listings, volume lists, uploads and deletes; each connection now has its own.
+ - A client that did not reconnect in time made the server free memory it never allocated.
+ - Directory listings no longer write past the end of their buffer when files are added to the directory while it is being listed, and very large directories no longer overflow.
+ - Volume names longer than 83 characters no longer corrupt the volume list.
+ - An upload to a full or write-protected disk no longer hangs the connection.
+ - Renaming a file no longer also attempts to create a directory.
+
 Bug fixes for "acp"
  - acp now exits with 0 on success, 1 when a transfer or listing fails and 2 on wrong usage.  It used to exit with 0 even after an error.
  - host:VOLUME:path is accepted next to host:VOLUME/path.  A second ':' used to be dropped silently, so host:BOOT:S meant the root of BOOT:.

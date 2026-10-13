@@ -10,6 +10,7 @@
 
 #include "protocolTypes.h"
 
+//Returns a newly allocated message (or NULL).  The caller must FreeVec() it.
 ProtocolMessageDirectoryList_t *getDirectoryList( char *path );
 
 #endif /* AMIGA_DIRECTORYLIST_H_ */

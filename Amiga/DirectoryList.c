@@ -26,9 +26,6 @@
 
 #include "AEUtil.h"
 
-#define DIR_MSG_LENGTH MAX_MESSAGE_LENGTH*5
-ProtocolMessageDirectoryList_t *dirListMsg = NULL;
-
 static signed getDirectoryNumberOfEntries( char *path, unsigned int *filenameBufferLen  )
 {
 	LONG returnCode = 0;
@@ -80,6 +77,7 @@ ProtocolMessageDirectoryList_t *getDirectoryList( char *path )
 	unsigned int sizeOfCurrentMessage = 0;
 	LONG returnCode = 0;
 	struct AnchorPath *ap = NULL;
+	ProtocolMessageDirectoryList_t *dirListMsg = NULL;
 
 	//dbglog( "[getDirectoryList] Getting directory list for path %s.\n", path );
 
@@ -96,10 +94,16 @@ ProtocolMessageDirectoryList_t *getDirectoryList( char *path )
 	directoryListSize++;
 	filenameBufferSize+=strlen( path );
 
-	//Allocate memory for the message
+	//Allocate memory for the message.  Every call gets its own message (the caller
+	//FreeVec's it after sending): client threads list directories concurrently, so a
+	//shared static buffer was overwritten mid-send and freed twice on the error path.
 	size_t messageSize = sizeof( ProtocolMessageDirectoryList_t ) + (sizeof( ProtocolMessage_DirEntry_t ) * directoryListSize ) + filenameBufferSize;
-	if( dirListMsg == NULL ) dirListMsg = ( ProtocolMessageDirectoryList_t* )AllocVec( DIR_MSG_LENGTH, MEMF_FAST|MEMF_CLEAR );
-	memset( dirListMsg, 0, DIR_MSG_LENGTH );
+	dirListMsg = ( ProtocolMessageDirectoryList_t* )AllocVec( messageSize, MEMF_FAST|MEMF_CLEAR );
+	if( dirListMsg == NULL )
+	{
+		dbglog( "[getDirectoryList] Unable to allocate %d bytes for the listing of '%s'.\n", messageSize, path );
+		return NULL;
+	}
 	endOfMessageMemory = ((char*)dirListMsg) + messageSize;
 	dbglog( "[getDirectoryList] dirListMsg: 0x%08x\n", (unsigned int)dirListMsg );
 	dbglog( "[getDirectoryList] dirListMsg size: %d bytes\n", messageSize );
@@ -131,6 +135,11 @@ ProtocolMessageDirectoryList_t *getDirectoryList( char *path )
 	dbglog( "[getDirectoryList] Opening directory %s to scan\n", path );
 
 	ap = AllocVec( sizeof( *ap ) + MAX_FILEPATH_LENGTH * 3, MEMF_FAST|MEMF_CLEAR );
+	if( ap == NULL )
+	{
+		FreeVec( dirListMsg );
+		return NULL;
+	}
 	ap->ap_Strlen = MAX_FILEPATH_LENGTH;
 	returnCode = MatchFirst( path, ap );
 	if( returnCode )
@@ -147,16 +156,20 @@ ProtocolMessageDirectoryList_t *getDirectoryList( char *path )
 	{
 		if( strlen( ap->ap_Info.fib_FileName ) > 0 && strcmp( path, ap->ap_Buf ) )
 		{
-			//Now add this as an entry in our list message
-			entry->size = ap->ap_Info.fib_Size;
-			entry->type = ap->ap_Info.fib_EntryType;
-			strncpy( entry->filename, ap->ap_Info.fib_FileName, strlen( (const char *)ap->ap_Info.fib_FileName ) );
-			entry->entrySize = sizeOfCurrentMessage = sizeof( ProtocolMessage_DirEntry_t ) + strlen( entry->filename );	//Note: because of the char[1] member of the ProtocolMessage_DirEntry_t we don't need an extra byte for the'\0'
+			//Check that the entry fits before writing it: files can be added to this
+			//directory (by another client) between the counting pass and this one.
+			sizeOfCurrentMessage = sizeof( ProtocolMessage_DirEntry_t ) + strlen( ap->ap_Info.fib_FileName );	//Note: because of the char[1] member of the ProtocolMessage_DirEntry_t we don't need an extra byte for the'\0'
 			if( ((char*)entry) + sizeOfCurrentMessage > endOfMessageMemory )
 			{
 				dbglog( "[getDirectoryList] Trying to write past end of message by %d ", (((char*)entry) + sizeOfCurrentMessage) - endOfMessageMemory );
 				break;
 			}
+
+			//Now add this as an entry in our list message
+			entry->size = ap->ap_Info.fib_Size;
+			entry->type = ap->ap_Info.fib_EntryType;
+			strncpy( entry->filename, ap->ap_Info.fib_FileName, strlen( (const char *)ap->ap_Info.fib_FileName ) );
+			entry->entrySize = sizeOfCurrentMessage;
 
 			//Increase the entry count
 			dirListMsg->entryCount++;
