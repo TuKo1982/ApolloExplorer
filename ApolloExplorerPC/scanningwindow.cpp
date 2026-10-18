@@ -2,6 +2,7 @@
 #include "ui_scanningwindow.h"
 #include <QPixmap>
 #include <QWindow>
+#include <QApplication>
 
 #include "AEUtils.h"
 
@@ -66,8 +67,8 @@ ScanningWindow::ScanningWindow(QWidget *parent) :
     m_SystemTrayMenu.addMenu( &m_SystemTrayHostsMenu );
     m_SystemTrayHostsMenu.setTitle( "Amiga Hosts" );
     m_SystemTrayMenu.addSeparator();
+    m_SystemTrayMenu.addAction( tr( "Exit" ), qApp, &QApplication::quit );
     connect( &m_SystemTrayIcon, &QSystemTrayIcon::activated, this, &ScanningWindow::onSystemTrayIconClickedSlot );
-    //QAction *quitAction = m_SystemTrayMenu.addAction( "Quit", this, &ScanningWindow::close );
 
     //Restore the last window position
     m_Settings->beginGroup( SETTINGS_SCANNING_WINDOW );
